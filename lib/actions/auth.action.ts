@@ -64,7 +64,7 @@ export async function signIn(params: SignInParams) {
 
         return {
             success: false,
-            message: "Fail to log into an account."
+            message: "Fail to log into an account. Please try again."
         }
     }
 }
@@ -80,8 +80,8 @@ export async function setSessionCookie(idToken: string) {
         maxAge: ONE_WEEK,
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
-        path: '/',
-        sameSite: 'lax'
+        path: "/",
+        sameSite: "lax"
     })
 }
 
@@ -96,12 +96,12 @@ export async function getCurrentUser(): Promise<User | null> {
         
         const decodedClaims = await auth.verifySessionCookie(sessionCookie, true);
 
-        const userRecored = await db.collection('user').doc(decodedClaims.uid).get();
+        const userRecored = await db.collection('users').doc(decodedClaims.uid).get();
 
         if (!userRecored.exists) return null;
 
         return {
-            ... userRecored.data(),
+            ...userRecored.data(),
             id: userRecored.id,
         } as User;
 

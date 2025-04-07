@@ -16,8 +16,6 @@ import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from "fire
 import { auth } from "@/firebase/client"
 import { signIn, signUp } from "@/lib/actions/auth.action"
 
-// type FormType = "sign-in" | "sign-up";
-
 
 const authFormSchema = (type: FormType) => {
     return z.object({
@@ -57,13 +55,13 @@ const AuthForm = ({ type }: { type: FormType}) => {
                     password
                 })
 
-                if (!result?.success) {
-                    toast.error(result?.message);
+                if (!result.success) {
+                    toast.error(result.message);
                     return;
                 }
 
                 toast.success("Account created successfully. Please sign in.");
-                router.push('/sign-in')
+                router.push('/sign-in');
             } else {
 
                 const { email, password } = values;
@@ -77,10 +75,15 @@ const AuthForm = ({ type }: { type: FormType}) => {
                     return;
                 }
 
-                await signIn({
-                    email, idToken
+                const result = await signIn({
+                    email, 
+                    idToken
                 });
-
+                
+                if (!result?.success) {
+                    toast.error(result?.message);
+                    return;
+                }
 
                 toast.success("Sign in successfully.");
                 router.push("/");
@@ -119,14 +122,14 @@ const AuthForm = ({ type }: { type: FormType}) => {
                             placeholder="Your Name" 
                         />
                     )}
-                    <FormField 
+                        <FormField 
                             control = {form.control} 
                             name = "email"
                             label="Email"
                             placeholder="Your email address" 
                             type="email"
                         />
-                    <FormField 
+                        <FormField 
                             control = {form.control} 
                             name = "password"
                             label="Password"
@@ -134,14 +137,21 @@ const AuthForm = ({ type }: { type: FormType}) => {
                             type="password"
                         />
 
-                    <Button className="btn" type="submit">{ isSignIn ? "Sign in" : "Create an account"}</Button>
+                        <Button 
+                            className="btn" 
+                            type="submit">{ isSignIn 
+                            ? "Sign In" 
+                            : "Create an account"}
+                        </Button>
                     </form>
                 </Form>
 
                 <p className="text-center">
                     {isSignIn ? "No account yet" : "Have an account already?"}
-                    <Link href={!isSignIn ? 'sign-in' : 'sign-up'} className="font-bold text-user-priamry ml-1">
-                        {!isSignIn ? "Sign in" : "Sign up"}
+                    <Link 
+                        href={!isSignIn ? '/sign-in' : '/sign-up'} 
+                        className="font-bold text-user-priamry ml-1">
+                        {!isSignIn ? "Sign In" : "Sign Up"}
                     </Link>
                 </p>
             </div>
