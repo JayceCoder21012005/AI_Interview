@@ -1,4 +1,4 @@
-"use client"
+"use client";
 
 import Image from "next/image";
 import { cn } from '@/lib/utils';
@@ -14,7 +14,7 @@ enum CallStatus {
 }
 
 interface SavedMessage {
-    role: 'user' | 'system' | 'assitant';
+    role: 'user' | 'system' | 'assistant';
     content: string;
 }
 
@@ -35,7 +35,7 @@ const Agent = ({ userName, userId, type }: AgentProps) => {
               const newMessage = { role: message.role, content: message.transcript };
               setMessages((prev) => [...prev, newMessage]);
             }
-          };
+        };
 
         const onSpeechStart = () => setIsSpeaking(true);
         const onSpeechEnd = () => setIsSpeaking(false);
@@ -62,12 +62,12 @@ const Agent = ({ userName, userId, type }: AgentProps) => {
 
     useEffect(() => {
         if (callStatus === CallStatus.FINISHED) router.push('/');
-    }, [messages, callStatus, type, userId]);
+    }, [messages, callStatus, type, userId, router]);
 
     const handleCall = async () => {
         setCallStatus(CallStatus.CONNECTING);
 
-        await vapi.start(process.env.NEXT_PUBLIC_WORKFLOW_ID!, {
+        await vapi.start(process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID!, {
             variableValues: {
                 username: userName,
                 userid: userId,
@@ -140,7 +140,7 @@ const Agent = ({ userName, userId, type }: AgentProps) => {
                     <button className="relative btn-call" onClick={handleCall}>
                         <span className={cn("absolute animate-ping rounded-full opacity-75", callStatus !== 'CONNECTING' && 'hidden')}/>
 
-                            <span className="relative">
+                            <span>
                                 {isCallInactiveOrFinished ? "Call" : ". . ."}
                             </span>
 
