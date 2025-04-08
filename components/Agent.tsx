@@ -35,7 +35,7 @@ const Agent = ({ userName, userId, type }: AgentProps) => {
               const newMessage = { role: message.role, content: message.transcript };
               setMessages((prev) => [...prev, newMessage]);
             }
-        };
+          };
 
         const onSpeechStart = () => setIsSpeaking(true);
         const onSpeechEnd = () => setIsSpeaking(false);
