@@ -72,7 +72,7 @@ const Agent = ({ userName, userId, type }: AgentProps) => {
                 username: userName,
                 userid: userId,
             }
-        })
+        });
     }
 
     const handleDisconnect = async () => {
@@ -137,7 +137,7 @@ const Agent = ({ userName, userId, type }: AgentProps) => {
 
             <div className="w-full flex justify-center">
                 {callStatus !== 'ACTIVE' ? (
-                    <button className="relative btn-call" onClick={handleCall}>
+                    <button className="relative btn-call" onClick={() => handleCall()}>
                         <span className={cn("absolute animate-ping rounded-full opacity-75", callStatus !== 'CONNECTING' && 'hidden')}/>
 
                             <span>
@@ -146,7 +146,7 @@ const Agent = ({ userName, userId, type }: AgentProps) => {
 
                     </button>
                 ) : (
-                    <button className="btn-disconnect" onClick={handleDisconnect}>
+                    <button className="btn-disconnect" onClick={() => handleDisconnect()}>
                         End
                     </button>
                 )}
