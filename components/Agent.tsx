@@ -20,13 +20,14 @@ interface SavedMessage {
   content: string;
 }
 
+
 const Agent = ({
   userName,
   userId,
   interviewId,
   feedbackId,
-  type, // "generate" | something else (run interview)
-  questions, // string[] for run interview mode
+  type, // "generate" | "interview"
+  questions,
 }: AgentProps) => {
   const router = useRouter();
   const [callStatus, setCallStatus] = useState<CallStatus>(CallStatus.INACTIVE);
@@ -75,66 +76,77 @@ const Agent = ({
     }
   }, [messages]);
 
+  // Create feedback AFTER interview call ends
   useEffect(() => {
     const handleGenerateFeedback = async () => {
-      // Feedback only makes sense after running the interview.
-      // If you also want feedback for generate calls, remove this guard.
-      if (type === "generate") {
+      if (callStatus !== CallStatus.FINISHED) return;
+
+      // Only create feedback after an interview session
+      if (type !== "interview") {
         router.push("/");
         return;
       }
 
       if (!interviewId || !userId) {
-        console.error("Missing interviewId/userId; cannot create feedback.");
+        console.error("Missing interviewId/userId; cannot create feedback.", {
+          interviewId,
+          userId,
+        });
         router.push("/");
         return;
       }
 
-      const { success, feedbackId: id } = await createFeedback({
+      if (messages.length === 0) {
+        console.error("Transcript is empty; cannot create feedback.");
+        router.push(`/interview/${interviewId}`);
+        return;
+      }
+
+      const res = await createFeedback({
         interviewId,
         userId,
         transcript: messages,
         feedbackId,
       });
 
-      if (success && id) {
+      console.log("createFeedback result:", res);
+
+      if (res?.success && res?.feedbackId) {
         router.push(`/interview/${interviewId}/feedback`);
       } else {
         console.log("Error saving feedback");
-        router.push("/");
+        router.push(`/interview/${interviewId}`);
       }
     };
 
-    if (callStatus === CallStatus.FINISHED) {
-      handleGenerateFeedback();
-    }
-  }, [callStatus, feedbackId, interviewId, messages, router, type, userId]);
+    handleGenerateFeedback();
+  }, [callStatus, type, interviewId, userId, messages, feedbackId, router]);
 
   const handleCall = async () => {
     setCallStatus(CallStatus.CONNECTING);
 
     if (type === "generate") {
-      // 1) Intake assistant: collects inputs and creates the session in Firestore
+      // Intake assistant: creates interview session
       await vapi.start(process.env.NEXT_PUBLIC_VAPI_INTERVIEW_INTAKE_ID!, {
         variableValues: {
-          userId: userId, // MUST match {{userId}} in intake prompt
-          username: userName, // optional
+          userId: userId,
+          username: userName,
         },
       });
     } else {
-      // 2) Runner assistant: asks questions for an existing session
+      // Runner assistant: runs interview on existing session
       const questionsJson = JSON.stringify(questions ?? []);
 
       await vapi.start(process.env.NEXT_PUBLIC_VAPI_INTERVIEW_RUNNER_ID!, {
         variableValues: {
-          questions: questionsJson, // A: JSON array string
+          questions: questionsJson, // JSON array string
         },
       });
     }
   };
 
+  // IMPORTANT: do NOT set FINISHED here; wait for "call-end"
   const handleDisconnect = () => {
-    setCallStatus(CallStatus.FINISHED);
     vapi.stop();
   };
 
