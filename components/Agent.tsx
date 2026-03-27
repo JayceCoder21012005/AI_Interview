@@ -23,8 +23,10 @@ interface SavedMessage {
 const Agent = ({
   userName,
   userId,
-  interviewId, // can be undefined in your new flow
+  interviewId,
   feedbackId,
+  type, // "generate" | something else (run interview)
+  questions, // string[] for run interview mode
 }: AgentProps) => {
   const router = useRouter();
   const [callStatus, setCallStatus] = useState<CallStatus>(CallStatus.INACTIVE);
@@ -32,44 +34,14 @@ const Agent = ({
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [lastMessage, setLastMessage] = useState<string>("");
 
-  // NEW: store the created interviewId returned by your backend tool
-  const [createdInterviewId, setCreatedInterviewId] = useState<string | null>(
-    interviewId ?? null
-  );
-
   useEffect(() => {
     const onCallStart = () => setCallStatus(CallStatus.ACTIVE);
     const onCallEnd = () => setCallStatus(CallStatus.FINISHED);
 
     const onMessage = (message: any) => {
-      // 1) Save transcript
       if (message.type === "transcript" && message.transcriptType === "final") {
         const newMessage = { role: message.role, content: message.transcript };
         setMessages((prev) => [...prev, newMessage]);
-      }
-
-      // 2) Capture tool result (IMPORTANT)
-      // The exact shape can vary; we check common shapes and fail gracefully.
-      // You should keep the console.log for 1 run to confirm the exact message format.
-      if (
-        message?.type?.includes("tool") ||
-        message?.type?.includes("function") ||
-        message?.toolCallList ||
-        message?.toolCalls ||
-        message?.results
-      ) {
-        console.log("Vapi tool-related message:", message);
-      }
-
-      // Try to locate interviewId from known locations
-      const maybeInterviewId =
-        message?.result?.interviewId ??
-        message?.results?.[0]?.result?.interviewId ??
-        message?.toolCallList?.[0]?.result?.interviewId ??
-        message?.toolCalls?.[0]?.result?.interviewId;
-
-      if (maybeInterviewId && typeof maybeInterviewId === "string") {
-        setCreatedInterviewId(maybeInterviewId);
       }
     };
 
@@ -105,24 +77,28 @@ const Agent = ({
 
   useEffect(() => {
     const handleGenerateFeedback = async () => {
-      // IMPORTANT: prefer createdInterviewId (from tool), fallback to prop interviewId
-      const finalInterviewId = createdInterviewId ?? interviewId;
+      // Feedback only makes sense after running the interview.
+      // If you also want feedback for generate calls, remove this guard.
+      if (type === "generate") {
+        router.push("/");
+        return;
+      }
 
-      if (!finalInterviewId) {
-        console.error("No interviewId found. Cannot create feedback.");
+      if (!interviewId || !userId) {
+        console.error("Missing interviewId/userId; cannot create feedback.");
         router.push("/");
         return;
       }
 
       const { success, feedbackId: id } = await createFeedback({
-        interviewId: finalInterviewId,
-        userId: userId!,
+        interviewId,
+        userId,
         transcript: messages,
         feedbackId,
       });
 
       if (success && id) {
-        router.push(`/interview/${finalInterviewId}/feedback`);
+        router.push(`/interview/${interviewId}/feedback`);
       } else {
         console.log("Error saving feedback");
         router.push("/");
@@ -130,29 +106,31 @@ const Agent = ({
     };
 
     if (callStatus === CallStatus.FINISHED) {
-      // CHANGE: always create feedback after the call ends
       handleGenerateFeedback();
     }
-  }, [
-    callStatus,
-    createdInterviewId,
-    feedbackId,
-    interviewId,
-    messages,
-    router,
-    userId,
-  ]);
+  }, [callStatus, feedbackId, interviewId, messages, router, type, userId]);
 
   const handleCall = async () => {
     setCallStatus(CallStatus.CONNECTING);
 
-    // Use the new assistant (no workflow)
-    await vapi.start(process.env.NEXT_PUBLIC_VAPI_ASSISTANT_ID!, {
-      variableValues: {
-        username: userName,
-        userId: userId, // matches {{userId}} in assistant prompt
-      },
-    });
+    if (type === "generate") {
+      // 1) Intake assistant: collects inputs and creates the session in Firestore
+      await vapi.start(process.env.NEXT_PUBLIC_VAPI_INTERVIEW_INTAKE_ID!, {
+        variableValues: {
+          userId: userId, // MUST match {{userId}} in intake prompt
+          username: userName, // optional
+        },
+      });
+    } else {
+      // 2) Runner assistant: asks questions for an existing session
+      const questionsJson = JSON.stringify(questions ?? []);
+
+      await vapi.start(process.env.NEXT_PUBLIC_VAPI_INTERVIEW_RUNNER_ID!, {
+        variableValues: {
+          questions: questionsJson, // A: JSON array string
+        },
+      });
+    }
   };
 
   const handleDisconnect = () => {
