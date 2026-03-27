@@ -6,7 +6,6 @@ import { useRouter } from "next/navigation";
 
 import { cn } from "@/lib/utils";
 import { vapi } from "@/lib/vapi.sdk";
-import { interviewer } from "@/constants";
 import { createFeedback } from "@/lib/actions/general.action";
 
 enum CallStatus {
@@ -24,10 +23,8 @@ interface SavedMessage {
 const Agent = ({
   userName,
   userId,
-  interviewId,
+  interviewId, // can be undefined in your new flow
   feedbackId,
-  type,
-  questions,
 }: AgentProps) => {
   const router = useRouter();
   const [callStatus, setCallStatus] = useState<CallStatus>(CallStatus.INACTIVE);
@@ -35,14 +32,44 @@ const Agent = ({
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [lastMessage, setLastMessage] = useState<string>("");
 
+  // NEW: store the created interviewId returned by your backend tool
+  const [createdInterviewId, setCreatedInterviewId] = useState<string | null>(
+    interviewId ?? null
+  );
+
   useEffect(() => {
     const onCallStart = () => setCallStatus(CallStatus.ACTIVE);
     const onCallEnd = () => setCallStatus(CallStatus.FINISHED);
 
     const onMessage = (message: any) => {
+      // 1) Save transcript
       if (message.type === "transcript" && message.transcriptType === "final") {
         const newMessage = { role: message.role, content: message.transcript };
         setMessages((prev) => [...prev, newMessage]);
+      }
+
+      // 2) Capture tool result (IMPORTANT)
+      // The exact shape can vary; we check common shapes and fail gracefully.
+      // You should keep the console.log for 1 run to confirm the exact message format.
+      if (
+        message?.type?.includes("tool") ||
+        message?.type?.includes("function") ||
+        message?.toolCallList ||
+        message?.toolCalls ||
+        message?.results
+      ) {
+        console.log("Vapi tool-related message:", message);
+      }
+
+      // Try to locate interviewId from known locations
+      const maybeInterviewId =
+        message?.result?.interviewId ??
+        message?.results?.[0]?.result?.interviewId ??
+        message?.toolCallList?.[0]?.result?.interviewId ??
+        message?.toolCalls?.[0]?.result?.interviewId;
+
+      if (maybeInterviewId && typeof maybeInterviewId === "string") {
+        setCreatedInterviewId(maybeInterviewId);
       }
     };
 
@@ -74,55 +101,58 @@ const Agent = ({
     if (messages.length > 0) {
       setLastMessage(messages[messages.length - 1].content);
     }
+  }, [messages]);
 
-    const handleGenerateFeedback = async (msgs: SavedMessage[]) => {
+  useEffect(() => {
+    const handleGenerateFeedback = async () => {
+      // IMPORTANT: prefer createdInterviewId (from tool), fallback to prop interviewId
+      const finalInterviewId = createdInterviewId ?? interviewId;
+
+      if (!finalInterviewId) {
+        console.error("No interviewId found. Cannot create feedback.");
+        router.push("/");
+        return;
+      }
+
       const { success, feedbackId: id } = await createFeedback({
-        interviewId: interviewId!,
+        interviewId: finalInterviewId,
         userId: userId!,
-        transcript: msgs,
+        transcript: messages,
         feedbackId,
       });
 
       if (success && id) {
-        router.push(`/interview/${interviewId}/feedback`);
+        router.push(`/interview/${finalInterviewId}/feedback`);
       } else {
+        console.log("Error saving feedback");
         router.push("/");
       }
     };
 
     if (callStatus === CallStatus.FINISHED) {
-      if (type === "generate") {
-        router.push("/");
-      } else {
-        handleGenerateFeedback(messages);
-      }
+      // CHANGE: always create feedback after the call ends
+      handleGenerateFeedback();
     }
-  }, [messages, callStatus, feedbackId, interviewId, router, type, userId]);
+  }, [
+    callStatus,
+    createdInterviewId,
+    feedbackId,
+    interviewId,
+    messages,
+    router,
+    userId,
+  ]);
 
   const handleCall = async () => {
     setCallStatus(CallStatus.CONNECTING);
 
-    if (type === "generate") {
-      // NEW: use assistantId (NOT workflowId)
-      await vapi.start(process.env.NEXT_PUBLIC_VAPI_ASSISTANT_ID!, {
-        // IMPORTANT: Web SDK expects variableValues at top-level
-        variableValues: {
-          username: userName,
-          userId: userId, // must match {{userId}} in the Vapi assistant prompt
-        },
-      });
-    } else {
-      let formattedQuestions = "";
-      if (questions) {
-        formattedQuestions = questions.map((q) => `- ${q}`).join("\n");
-      }
-
-      await vapi.start(interviewer, {
-        variableValues: {
-          questions: formattedQuestions,
-        },
-      });
-    }
+    // Use the new assistant (no workflow)
+    await vapi.start(process.env.NEXT_PUBLIC_VAPI_ASSISTANT_ID!, {
+      variableValues: {
+        username: userName,
+        userId: userId, // matches {{userId}} in assistant prompt
+      },
+    });
   };
 
   const handleDisconnect = () => {
