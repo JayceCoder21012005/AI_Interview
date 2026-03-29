@@ -56,22 +56,72 @@ function isMeetingEndedDailyError(err: unknown) {
   return String(msg).toLowerCase().includes("meeting has ended");
 }
 
-export default function Agent(props: AgentProps) {
-  const { userName, userId, interviewId, feedbackId, type, questions } = props;
-
+export default function Agent({
+  userName,
+  userId,
+  interviewId,
+  feedbackId,
+  type,
+  questions,
+}: AgentProps) {
   const router = useRouter();
 
   const [callStatus, setCallStatus] = useState<CallStatus>(CallStatus.INACTIVE);
   const [messages, setMessages] = useState<SavedMessage[]>([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
 
-  // prevent duplicate feedback generation on multiple FINISHED transitions
+  // Prevent duplicate feedback generation
   const feedbackTriggeredRef = useRef(false);
 
   const lastMessage = useMemo(
     () => (messages.length ? messages[messages.length - 1].content : ""),
     [messages]
   );
+
+  const finalizeInterview = async (source: "call-end" | "user-end") => {
+    if (feedbackTriggeredRef.current) return;
+    feedbackTriggeredRef.current = true;
+
+    // Only generate feedback after an interview call
+    if (type !== "interview") {
+      router.push("/");
+      return;
+    }
+
+    if (!interviewId || !userId) {
+      console.error("Missing interviewId/userId for feedback", {
+        interviewId,
+        userId,
+        source,
+      });
+      router.push("/");
+      return;
+    }
+
+    // Give a small grace period for final transcript messages to arrive
+    await new Promise((r) => setTimeout(r, 400));
+
+    if (!messages.length) {
+      console.warn("Transcript empty; skipping feedback generation.", { source });
+      router.push(`/interview/${interviewId}`);
+      return;
+    }
+
+    const res = await createFeedback({
+      interviewId,
+      userId,
+      transcript: messages,
+      feedbackId,
+    });
+
+    console.log("createFeedback result:", res);
+
+    if (res?.success && res?.feedbackId) {
+      router.push(`/interview/${interviewId}/feedback`);
+    } else {
+      router.push(`/interview/${interviewId}`);
+    }
+  };
 
   // ---------- Vapi event listeners ----------
   useEffect(() => {
@@ -81,7 +131,10 @@ export default function Agent(props: AgentProps) {
       setCallStatus(CallStatus.ACTIVE);
     };
 
-    const onCallEnd = () => setCallStatus(CallStatus.FINISHED);
+    const onCallEnd = () => {
+      setCallStatus(CallStatus.FINISHED);
+      finalizeInterview("call-end");
+    };
 
     const onMessage = (msg: unknown) => {
       if (!isFinalTranscriptMessage(msg)) return;
@@ -114,7 +167,8 @@ export default function Agent(props: AgentProps) {
       vapi.off("speech-end", onSpeechEnd);
       vapi.off("error", onError);
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [type, interviewId, userId, feedbackId, messages, router]);
 
   // ---------- Start call ----------
   const startCall = async () => {
@@ -123,8 +177,8 @@ export default function Agent(props: AgentProps) {
     try {
       if (type === "generate") {
         const intakeId = process.env.NEXT_PUBLIC_VAPI_INTERVIEW_INTAKE_ID;
-        if (!intakeId) throw new Error("Missing NEXT_PUBLIC_VAPI_INTERVIEW_INTAKE_ID");
-
+        if (!intakeId)
+          throw new Error("Missing NEXT_PUBLIC_VAPI_INTERVIEW_INTAKE_ID");
         if (!userId) throw new Error("Missing userId for intake flow");
 
         await vapi.start(intakeId, {
@@ -133,9 +187,9 @@ export default function Agent(props: AgentProps) {
         return;
       }
 
-      // type === "interview"
       const runnerId = process.env.NEXT_PUBLIC_VAPI_INTERVIEW_RUNNER_ID;
-      if (!runnerId) throw new Error("Missing NEXT_PUBLIC_VAPI_INTERVIEW_RUNNER_ID");
+      if (!runnerId)
+        throw new Error("Missing NEXT_PUBLIC_VAPI_INTERVIEW_RUNNER_ID");
 
       const questionsJson = JSON.stringify(questions ?? []);
       await vapi.start(runnerId, { variableValues: { questions: questionsJson } });
@@ -145,63 +199,16 @@ export default function Agent(props: AgentProps) {
     }
   };
 
-  // ---------- End call ----------
+  // ---------- End call (always finalize) ----------
   const endCall = () => {
-    // wait for Vapi "call-end" event to flip state to FINISHED
     vapi.stop();
+
+    // fallback: if call-end doesn't arrive quickly, still finalize
+    setTimeout(() => {
+      finalizeInterview("user-end");
+    }, 1200);
   };
 
-  // ---------- Post-call feedback generation ----------
-  useEffect(() => {
-    const run = async () => {
-      if (callStatus !== CallStatus.FINISHED) return;
-      if (feedbackTriggeredRef.current) return;
-
-      // Only generate feedback after an interview call
-      if (type !== "interview") {
-        router.push("/");
-        return;
-      }
-
-      if (!interviewId || !userId) {
-        console.error("Missing interviewId/userId for feedback", {
-          interviewId,
-          userId,
-        });
-        router.push("/");
-        return;
-      }
-
-      feedbackTriggeredRef.current = true;
-
-      // if transcript is empty, keep user on interview page (don’t send them away)
-      if (!messages.length) {
-        console.warn("Transcript empty; skipping feedback generation.");
-        router.push(`/interview/${interviewId}`);
-        return;
-      }
-
-      const res = await createFeedback({
-        interviewId,
-        userId,
-        transcript: messages,
-        feedbackId,
-      });
-
-      console.log("createFeedback result:", res);
-
-      if (res?.success && res?.feedbackId) {
-        router.push(`/interview/${interviewId}/feedback`);
-      } else {
-        // If Gemini quota fails, res.success will be false (or your degraded mode)
-        router.push(`/interview/${interviewId}`);
-      }
-    };
-
-    run();
-  }, [callStatus, type, interviewId, userId, messages, feedbackId, router]);
-
-  // ---------- UI ----------
   return (
     <>
       <div className="call-view">
