@@ -1,12 +1,23 @@
 "use client";
 
 import Image from "next/image";
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { cn } from "@/lib/utils";
 import { vapi } from "@/lib/vapi.sdk";
 import { createFeedback } from "@/lib/actions/general.action";
+
+type AgentType = "generate" | "interview";
+
+interface AgentProps {
+  userName: string;
+  userId?: string;
+  interviewId?: string; // REQUIRED when type==="interview"
+  feedbackId?: string;
+  type: AgentType;
+  questions?: string[]; // used when type==="interview"
+}
 
 enum CallStatus {
   INACTIVE = "INACTIVE",
@@ -15,42 +26,77 @@ enum CallStatus {
   FINISHED = "FINISHED",
 }
 
-interface SavedMessage {
-  role: "user" | "system" | "assistant";
+type SavedMessage = {
+  role: "user" | "assistant" | "system";
   content: string;
+};
+
+type VapiTranscriptMessage = {
+  type: "transcript";
+  transcriptType: "partial" | "final";
+  role: SavedMessage["role"];
+  transcript: string;
+};
+
+function isFinalTranscriptMessage(msg: unknown): msg is VapiTranscriptMessage {
+  if (!msg || typeof msg !== "object") return false;
+  const m = msg as Partial<VapiTranscriptMessage>;
+  return (
+    m.type === "transcript" &&
+    m.transcriptType === "final" &&
+    typeof m.transcript === "string" &&
+    (m.role === "user" || m.role === "assistant" || m.role === "system")
+  );
 }
 
+function isMeetingEndedDailyError(err: unknown) {
+  const e = err as any;
+  const msg =
+    e?.errorMsg || e?.error?.msg || e?.error?.message || e?.message || "";
+  return String(msg).toLowerCase().includes("meeting has ended");
+}
 
-const Agent = ({
-  userName,
-  userId,
-  interviewId,
-  feedbackId,
-  type, // "generate" | "interview"
-  questions,
-}: AgentProps) => {
+export default function Agent(props: AgentProps) {
+  const { userName, userId, interviewId, feedbackId, type, questions } = props;
+
   const router = useRouter();
+
   const [callStatus, setCallStatus] = useState<CallStatus>(CallStatus.INACTIVE);
   const [messages, setMessages] = useState<SavedMessage[]>([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [lastMessage, setLastMessage] = useState<string>("");
 
+  // prevent duplicate feedback generation on multiple FINISHED transitions
+  const feedbackTriggeredRef = useRef(false);
+
+  const lastMessage = useMemo(
+    () => (messages.length ? messages[messages.length - 1].content : ""),
+    [messages]
+  );
+
+  // ---------- Vapi event listeners ----------
   useEffect(() => {
-    const onCallStart = () => setCallStatus(CallStatus.ACTIVE);
+    const onCallStart = () => {
+      feedbackTriggeredRef.current = false;
+      setMessages([]);
+      setCallStatus(CallStatus.ACTIVE);
+    };
+
     const onCallEnd = () => setCallStatus(CallStatus.FINISHED);
 
-    const onMessage = (message: any) => {
-      if (message.type === "transcript" && message.transcriptType === "final") {
-        const newMessage = { role: message.role, content: message.transcript };
-        setMessages((prev) => [...prev, newMessage]);
-      }
+    const onMessage = (msg: unknown) => {
+      if (!isFinalTranscriptMessage(msg)) return;
+      setMessages((prev) => [
+        ...prev,
+        { role: msg.role, content: msg.transcript },
+      ]);
     };
 
     const onSpeechStart = () => setIsSpeaking(true);
     const onSpeechEnd = () => setIsSpeaking(false);
 
-    const onError = (error: any) => {
-      console.log("Vapi error:", error);
+    const onError = (err: unknown) => {
+      if (isMeetingEndedDailyError(err)) return;
+      console.log("Vapi error:", err);
     };
 
     vapi.on("call-start", onCallStart);
@@ -70,25 +116,55 @@ const Agent = ({
     };
   }, []);
 
-  useEffect(() => {
-    if (messages.length > 0) {
-      setLastMessage(messages[messages.length - 1].content);
+  // ---------- Start call ----------
+  const startCall = async () => {
+    setCallStatus(CallStatus.CONNECTING);
+
+    try {
+      if (type === "generate") {
+        const intakeId = process.env.NEXT_PUBLIC_VAPI_INTERVIEW_INTAKE_ID;
+        if (!intakeId) throw new Error("Missing NEXT_PUBLIC_VAPI_INTERVIEW_INTAKE_ID");
+
+        if (!userId) throw new Error("Missing userId for intake flow");
+
+        await vapi.start(intakeId, {
+          variableValues: { userId, username: userName },
+        });
+        return;
+      }
+
+      // type === "interview"
+      const runnerId = process.env.NEXT_PUBLIC_VAPI_INTERVIEW_RUNNER_ID;
+      if (!runnerId) throw new Error("Missing NEXT_PUBLIC_VAPI_INTERVIEW_RUNNER_ID");
+
+      const questionsJson = JSON.stringify(questions ?? []);
+      await vapi.start(runnerId, { variableValues: { questions: questionsJson } });
+    } catch (err) {
+      console.log("Failed to start Vapi call:", err);
+      setCallStatus(CallStatus.INACTIVE);
     }
-  }, [messages]);
+  };
 
-  // Create feedback AFTER interview call ends
+  // ---------- End call ----------
+  const endCall = () => {
+    // wait for Vapi "call-end" event to flip state to FINISHED
+    vapi.stop();
+  };
+
+  // ---------- Post-call feedback generation ----------
   useEffect(() => {
-    const handleGenerateFeedback = async () => {
+    const run = async () => {
       if (callStatus !== CallStatus.FINISHED) return;
+      if (feedbackTriggeredRef.current) return;
 
-      // Only create feedback after an interview session
+      // Only generate feedback after an interview call
       if (type !== "interview") {
         router.push("/");
         return;
       }
 
       if (!interviewId || !userId) {
-        console.error("Missing interviewId/userId; cannot create feedback.", {
+        console.error("Missing interviewId/userId for feedback", {
           interviewId,
           userId,
         });
@@ -96,8 +172,11 @@ const Agent = ({
         return;
       }
 
-      if (messages.length === 0) {
-        console.error("Transcript is empty; cannot create feedback.");
+      feedbackTriggeredRef.current = true;
+
+      // if transcript is empty, keep user on interview page (don’t send them away)
+      if (!messages.length) {
+        console.warn("Transcript empty; skipping feedback generation.");
         router.push(`/interview/${interviewId}`);
         return;
       }
@@ -114,42 +193,15 @@ const Agent = ({
       if (res?.success && res?.feedbackId) {
         router.push(`/interview/${interviewId}/feedback`);
       } else {
-        console.log("Error saving feedback");
+        // If Gemini quota fails, res.success will be false (or your degraded mode)
         router.push(`/interview/${interviewId}`);
       }
     };
 
-    handleGenerateFeedback();
+    run();
   }, [callStatus, type, interviewId, userId, messages, feedbackId, router]);
 
-  const handleCall = async () => {
-    setCallStatus(CallStatus.CONNECTING);
-
-    if (type === "generate") {
-      // Intake assistant: creates interview session
-      await vapi.start(process.env.NEXT_PUBLIC_VAPI_INTERVIEW_INTAKE_ID!, {
-        variableValues: {
-          userId: userId,
-          username: userName,
-        },
-      });
-    } else {
-      // Runner assistant: runs interview on existing session
-      const questionsJson = JSON.stringify(questions ?? []);
-
-      await vapi.start(process.env.NEXT_PUBLIC_VAPI_INTERVIEW_RUNNER_ID!, {
-        variableValues: {
-          questions: questionsJson, // JSON array string
-        },
-      });
-    }
-  };
-
-  // IMPORTANT: do NOT set FINISHED here; wait for "call-end"
-  const handleDisconnect = () => {
-    vapi.stop();
-  };
-
+  // ---------- UI ----------
   return (
     <>
       <div className="call-view">
@@ -157,7 +209,7 @@ const Agent = ({
           <div className="avatar">
             <Image
               src="/ai-avatar.png"
-              alt="profile-image"
+              alt="ai"
               width={65}
               height={54}
               className="object-cover"
@@ -171,9 +223,9 @@ const Agent = ({
           <div className="card-content">
             <Image
               src="/user-avatar.png"
-              alt="profile-image"
-              width={539}
-              height={539}
+              alt="user"
+              width={120}
+              height={120}
               className="rounded-full object-cover size-[120px]"
             />
             <h3>{userName}</h3>
@@ -181,7 +233,7 @@ const Agent = ({
         </div>
       </div>
 
-      {messages.length > 0 && (
+      {!!lastMessage && (
         <div className="transcript-border">
           <div className="transcript">
             <p
@@ -198,28 +250,26 @@ const Agent = ({
       )}
 
       <div className="w-full flex justify-center">
-        {callStatus !== "ACTIVE" ? (
-          <button className="relative btn-call" onClick={handleCall}>
+        {callStatus !== CallStatus.ACTIVE ? (
+          <button className="relative btn-call" onClick={startCall}>
             <span
               className={cn(
                 "absolute animate-ping rounded-full opacity-75",
-                callStatus !== "CONNECTING" && "hidden"
+                callStatus !== CallStatus.CONNECTING && "hidden"
               )}
             />
             <span className="relative">
-              {callStatus === "INACTIVE" || callStatus === "FINISHED"
+              {callStatus === CallStatus.INACTIVE || callStatus === CallStatus.FINISHED
                 ? "Call"
                 : ". . ."}
             </span>
           </button>
         ) : (
-          <button className="btn-disconnect" onClick={handleDisconnect}>
+          <button className="btn-disconnect" onClick={endCall}>
             End
           </button>
         )}
       </div>
     </>
   );
-};
-
-export default Agent;
+}
